@@ -127,6 +127,37 @@
             background: #eecfa1;
         }
 
+        #settings {
+            margin-top: 20px;
+            text-align: center;
+        }
+        
+        #settings label {
+            display: block;
+            font-size: 20px;
+            margin-bottom: 5px;
+            color: #deb887;
+        }
+
+        input[type=range] {
+            -webkit-appearance: none;
+            width: 300px;
+            height: 15px;
+            background: #3e2723;
+            outline: none;
+            border: 2px solid #deb887;
+        }
+
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 25px;
+            height: 25px;
+            background: #deb887;
+            cursor: pointer;
+            border: 2px solid #3e2723;
+        }
+
         #damage-overlay {
             position: absolute;
             top: 0;
@@ -300,6 +331,12 @@
         <p>4 to Drink Tonic (Boosts Dead Eye)</p>
         <p>1 - REVOLVER | 2 - SHOTGUN | 3 - RIFLE</p>
         <p>Collect Green Boxes for Ammo, Red Bottles for Tonics</p>
+        
+        <div id="settings">
+            <label for="sensitivity-slider">MOUSE SENSITIVITY: <span id="sens-val">2.0</span></label>
+            <input type="range" id="sensitivity-slider" min="0.1" max="5.0" step="0.1" value="2.0">
+        </div>
+
         <button id="start-btn">RIDE OUT</button>
     </div>
 
@@ -321,6 +358,8 @@
         let direction = new THREE.Vector3();
         let prevTime = performance.now();
         
+        let mouseSensitivity = 0.002; // Default sensitivity
+
         let playerHealth = 100;
         let wave = 1;
         let enemies = [];
@@ -774,7 +813,7 @@
 
         function ejectShells(count, gun) {
             const origin = new THREE.Vector3();
-            gun.mesh.getWorldPosition(origin);
+            gun.mesh.getWorldposition(origin);
             origin.y += 0.1; // Slightly above gun
 
             // Gun quaternion for direction
@@ -820,7 +859,7 @@
             loadingShells = [];
 
             const dest = new THREE.Vector3();
-            gun.mesh.getWorldPosition(dest);
+            gun.mesh.getWorldposition(dest);
             dest.y -= 0.2; // Target: Gun breech
 
             // Camera quaternion
@@ -917,6 +956,16 @@
             document.getElementById('start-btn').addEventListener('click', () => {
                 initAudio(); // Init audio context on user gesture
                 document.body.requestPointerLock();
+            });
+
+            // Sensitivity Slider
+            const sensSlider = document.getElementById('sensitivity-slider');
+            const sensLabel = document.getElementById('sens-val');
+            
+            sensSlider.addEventListener('input', (e) => {
+                const val = parseFloat(e.target.value);
+                sensLabel.innerText = val.toFixed(1);
+                mouseSensitivity = val * 0.001; // 2.0 * 0.001 = 0.002 (Default)
             });
 
             document.addEventListener('pointerlockchange', () => {
@@ -2110,13 +2159,19 @@
             let movementX = event.movementX || event.mozMovementX || 0;
             let movementY = event.movementY || event.mozMovementY || 0;
             
-            // If the jump is unreasonably large (e.g. > 100px per frame), ignore it or clamp it
-            if (Math.abs(movementX) > 100) movementX = 0;
-            if (Math.abs(movementY) > 100) movementY = 0;
+            // REFINED FIX: Clamp values instead of zeroing them.
+            const MAX_STEP = 50; 
+            if (movementX > MAX_STEP) movementX = MAX_STEP;
+            if (movementX < -MAX_STEP) movementX = -MAX_STEP;
+            if (movementY > MAX_STEP) movementY = MAX_STEP;
+            if (movementY < -MAX_STEP) movementY = -MAX_STEP;
 
             euler.setFromQuaternion(camera.quaternion);
-            euler.y -= movementX * 0.002;
-            euler.x -= movementY * 0.002;
+            
+            // Use variable sensitivity
+            euler.y -= movementX * mouseSensitivity;
+            euler.x -= movementY * mouseSensitivity;
+            
             euler.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, euler.x));
             camera.quaternion.setFromEuler(euler);
         }
