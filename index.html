@@ -140,13 +140,29 @@
             z-index: 4;
         }
 
+        /* New Fail Overlay (Black/Gold Haze) */
+        #fail-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            /* Black outer edges, fading to Gold, then transparent center */
+            background: radial-gradient(circle, transparent 55%, rgba(184, 134, 11, 0.3) 75%, rgba(0, 0, 0, 0.95) 100%);
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.5s ease-out;
+            z-index: 4;
+        }
+
         #deadeye-overlay {
             position: absolute;
             top: 0;
             left: 0;
             width: 100%;
             height: 100%;
-            background: rgba(189, 59, 21, 0.2); /* Red tint */
+            /* Stronger Red Vignette for visibility */
+            background: radial-gradient(circle, rgba(255, 60, 0, 0.2) 20%, rgba(100, 0, 0, 0.7) 100%);
             mix-blend-mode: multiply;
             opacity: 0;
             pointer-events: none;
@@ -248,6 +264,7 @@
     <div id="game-container"></div>
     <div id="crosshair"></div>
     <div id="damage-overlay"></div>
+    <div id="fail-overlay"></div>
     <div id="deadeye-overlay">
         <div id="deadeye-text">DEAD EYE ACTIVE<br><span style="font-size:20px; letter-spacing: 2px;">CLICK TO MARK - Q TO FIRE</span></div>
     </div>
@@ -300,7 +317,7 @@
         let camera, scene, renderer;
         let controlsEnabled = false;
         let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
-        let velocity = new THREE.Vector3();
+        let velocity = new THREE.Vector3(); // Now World Space velocity (x, y, z)
         let direction = new THREE.Vector3();
         let prevTime = performance.now();
         
@@ -320,6 +337,7 @@
         let isCocking = false;
         let lastStepTime = 0; // Timer for footsteps
         let healTimer = 0; // Passive healing timer
+        let shakeTime = 0; // Screen shake timer
         
         // Dead Eye
         let deadEyeActive = false;
@@ -495,6 +513,24 @@
 
             noise.start();
             noise.stop(audioCtx.currentTime + 0.5);
+        }
+
+        function playDryFireSound() {
+            if (!audioCtx) return;
+            const t = audioCtx.currentTime;
+            const osc = audioCtx.createOscillator();
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(800, t);
+            osc.frequency.exponentialRampToValueAtTime(100, t + 0.05);
+            
+            const gain = audioCtx.createGain();
+            gain.gain.setValueAtTime(0.3, t);
+            gain.gain.exponentialRampToValueAtTime(0.01, t + 0.05);
+            
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start(t);
+            osc.stop(t + 0.05);
         }
 
         function playHeartbeatSound() {
@@ -1478,7 +1514,8 @@
             const mat = new THREE.MeshLambertMaterial({ color: 0x8b0000 }); 
             const matHead = new THREE.MeshLambertMaterial({ color: 0xffccaa }); 
             const matHat = new THREE.MeshLambertMaterial({ color: 0x000000 }); 
-            const matGun = new THREE.MeshStandardMaterial({ color: 0x111111, metalness: 0.8, roughness: 0.4 }); // Gun Material
+            const matGun = new THREE.MeshStandardMaterial({ color: 0x111111, metalness: 0.8, roughness: 0.4 }); 
+            const matScarf = new THREE.MeshLambertMaterial({ color: 0x006400 }); // Green Scarf
 
             const group = new THREE.Group();
 
@@ -1492,6 +1529,12 @@
             head.position.y = 1.8;
             head.name = 'Head';
             group.add(head);
+
+            // Scarf
+            const scarf = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.2, 0.7), matScarf);
+            scarf.position.y = 1.5; // Neck position
+            scarf.name = 'Scarf';
+            group.add(scarf);
 
             const hatBrim = new THREE.Mesh(new THREE.BoxGeometry(1, 0.1, 1), matHat);
             hatBrim.position.y = 2.1;
@@ -1885,7 +1928,13 @@
                             child.renderOrder = 999;
                         } else if (deadEyeActive) {
                             // PRIORITY 2: Dead Eye = Red Highlight (Occluded by walls)
-                            child.material.emissive.setHex(0xff0000);
+                            // Head is Bright Red, Body is Normal (No Highlight)
+                            if (child.name === 'Head') {
+                                child.material.emissive.setHex(0xff0000); 
+                            } else {
+                                child.material.emissive.setHex(0x000000); 
+                            }
+                            
                             child.material.depthTest = true;
                             child.material.depthWrite = true;
                             child.renderOrder = 0; 
@@ -1905,6 +1954,23 @@
         function setEnemyHighlight(active) {
             // Deprecated: Logic moved to updateEnemyVisuals to handle complex states
             updateEnemyVisuals();
+        }
+
+        function triggerDeadEyeFailEffect() {
+            // Visual Overlay
+            const overlay = document.getElementById('fail-overlay');
+            if (overlay) {
+                overlay.style.opacity = 1;
+                setTimeout(() => {
+                    overlay.style.opacity = 0;
+                }, 1000);
+            }
+
+            // Screen Shake
+            shakeTime = 0.5; // Seconds
+
+            // Audio
+            playDryFireSound();
         }
 
         function toggleDeadEye() {
@@ -1938,7 +2004,11 @@
             } else {
                 // Activate check: Needs at least 50% charge of CURRENT max
                 const currentMax = getMaxDeadEye();
-                if (deadEyeCharge < currentMax / 2) return;
+                if (deadEyeCharge < currentMax / 2) {
+                    // FAILURE FEEDBACK
+                    triggerDeadEyeFailEffect();
+                    return;
+                }
 
                 // Activate
                 deadEyeActive = true;
@@ -2035,8 +2105,15 @@
         const euler = new THREE.Euler(0, 0, 0, 'YXZ');
         function onMouseMove(event) {
             if (!controlsEnabled) return;
-            const movementX = event.movementX || event.mozMovementX || 0;
-            const movementY = event.movementY || event.mozMovementY || 0;
+            
+            // Fix: Clamp movement to prevent camera jumps on some devices
+            let movementX = event.movementX || event.mozMovementX || 0;
+            let movementY = event.movementY || event.mozMovementY || 0;
+            
+            // If the jump is unreasonably large (e.g. > 100px per frame), ignore it or clamp it
+            if (Math.abs(movementX) > 100) movementX = 0;
+            if (Math.abs(movementY) > 100) movementY = 0;
+
             euler.setFromQuaternion(camera.quaternion);
             euler.y -= movementX * 0.002;
             euler.x -= movementY * 0.002;
@@ -2074,24 +2151,28 @@
             prevTime = time;
 
             // --- Update Shell Physics ---
-            // ... (Shell logic stays same) ...
             for (let i = casings.length - 1; i >= 0; i--) {
                 const c = casings[i];
                 if (c.active) {
-                    c.velocity.y -= 9.8 * delta;
+                    c.velocity.y -= 9.8 * delta; // Gravity
                     c.mesh.position.add(c.velocity.clone().multiplyScalar(delta));
                     c.mesh.rotation.x += c.rotVel.x * delta;
                     c.mesh.rotation.z += c.rotVel.z * delta;
+
+                    // Ground Collision
                     if (c.mesh.position.y <= 0.02) {
                         c.mesh.position.y = 0.02;
-                        c.velocity.y *= -0.5;
-                        c.velocity.x *= 0.8;
+                        c.velocity.y *= -0.5; // Bounce dampen
+                        c.velocity.x *= 0.8;  // Friction
                         c.velocity.z *= 0.8;
+                        
                         c.bounces++;
+                        
                         if (c.velocity.length() < 0.1) c.active = false;
                     }
                 }
             }
+            // Cleanup old casings
             if (casings.length > 20) {
                 const old = casings.shift();
                 scene.remove(old.mesh);
@@ -2102,9 +2183,15 @@
                 const s = loadingShells[i];
                 const elapsed = time - s.startTime;
                 const progress = Math.min(1, elapsed / s.duration);
+                
+                // Lerp Up and In
+                // Start: 0.2, -1.0, -0.5
+                // End:   0.2, -0.4, -0.6
                 s.mesh.position.y = -1.0 + ((-0.4 - -1.0) * progress);
                 s.mesh.position.z = -0.5 + ((-0.6 - -0.5) * progress);
+                
                 if (progress >= 1) {
+                    // "Inserted"
                     camera.remove(s.mesh);
                     loadingShells.splice(i, 1);
                 }
@@ -2112,6 +2199,16 @@
 
             if (controlsEnabled && gameActive) {
                 
+                // Screen Shake Logic (Failure Effect)
+                if (shakeTime > 0) {
+                    shakeTime -= delta;
+                    const shakeMag = 0.1; // Intensity
+                    // Add noise to position (will be slightly overridden by movement but creates jitter)
+                    camera.position.x += (Math.random() - 0.5) * shakeMag;
+                    camera.position.y += (Math.random() - 0.5) * shakeMag;
+                    camera.position.z += (Math.random() - 0.5) * shakeMag;
+                }
+
                 // Update Enemy Highlights (X-Ray for low count, etc.)
                 updateEnemyVisuals();
                 
@@ -2197,30 +2294,49 @@
                 if (!isExecutingDeadEye) {
                     // Normal Gameplay Logic
                     
+                    // MOVEMENT UPDATE: World Space Calculation to prevent "ice skating"
+                    // Get forward vector flat on XZ plane
+                    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+                    forward.y = 0;
+                    forward.normalize();
+                    
+                    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+                    right.y = 0;
+                    right.normalize();
+
+                    // Apply Input directly to world velocity
+                    if (moveForward) {
+                        velocity.x += forward.x * 100 * delta;
+                        velocity.z += forward.z * 100 * delta;
+                    }
+                    if (moveBackward) {
+                        velocity.x -= forward.x * 100 * delta;
+                        velocity.z -= forward.z * 100 * delta;
+                    }
+                    if (moveRight) {
+                        velocity.x += right.x * 100 * delta;
+                        velocity.z += right.z * 100 * delta;
+                    }
+                    if (moveLeft) {
+                        velocity.x -= right.x * 100 * delta;
+                        velocity.z -= right.z * 100 * delta;
+                    }
+
+                    // Friction
                     velocity.x -= velocity.x * 10.0 * delta;
                     velocity.z -= velocity.z * 10.0 * delta;
                     velocity.y -= 30.0 * delta; 
 
-                    direction.z = Number(moveBackward) - Number(moveForward);
-                    direction.x = Number(moveRight) - Number(moveLeft);
-                    direction.normalize();
-
-                    const isMoving = moveForward || moveBackward || moveLeft || moveRight;
-
-                    if (moveForward || moveBackward) velocity.z -= direction.z * 100.0 * delta;
-                    if (moveLeft || moveRight) velocity.x -= direction.x * 100.0 * delta;
-
+                    // Apply Position
                     const startPos = camera.position.clone();
-                    camera.translateX(-velocity.x * delta);
+                    camera.position.x += velocity.x * delta;
                     if (checkCollision(camera.position)) {
                         camera.position.x = startPos.x; 
-                        camera.position.z = startPos.z; 
                     }
 
                     const midPos = camera.position.clone();
-                    camera.translateZ(-velocity.z * delta);
+                    camera.position.z += velocity.z * delta;
                     if (checkCollision(camera.position)) {
-                        camera.position.x = midPos.x;
                         camera.position.z = midPos.z;
                     }
 
@@ -2232,6 +2348,7 @@
                         camera.position.y = PLAYER_HEIGHT;
 
                         // Play footstep if moving on ground
+                        const isMoving = moveForward || moveBackward || moveLeft || moveRight;
                         if (isMoving && (time - lastStepTime > 400)) { // Every 400ms
                             playFootstepSound();
                             lastStepTime = time;
