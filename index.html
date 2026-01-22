@@ -46,6 +46,12 @@
             z-index: 5;
         }
 
+        #tonic-display {
+            display: inline-block;
+            margin-top: 5px;
+            color: #8b0000; /* Dark Red */
+        }
+
         #weapon-name {
             display: block;
             font-size: 20px;
@@ -260,7 +266,8 @@
 
     <div id="hud">
         HEALTH: <span id="health-val">100</span>%<br>
-        WAVE: <span id="wave-val">1</span>
+        WAVE: <span id="wave-val">1</span><br>
+        <span id="tonic-display">TONICS: <span id="tonic-val">1</span>/2 (Press 4)</span>
     </div>
 
     <div id="ammo-display">
@@ -273,8 +280,9 @@
         <div id="game-over-msg">YOU DIED, PARTNER.</div>
         <p>WASD to Move | CLICK to Shoot | R to Reload</p>
         <p>HOLD 'E' to Fan Revolver | Z for DEAD EYE</p>
+        <p>4 to Drink Tonic (Boosts Dead Eye)</p>
         <p>1 - REVOLVER | 2 - SHOTGUN | 3 - RIFLE</p>
-        <p>Collect Green Boxes for Ammo</p>
+        <p>Collect Green Boxes for Ammo, Red Bottles for Tonics</p>
         <button id="start-btn">RIDE OUT</button>
     </div>
 
@@ -301,6 +309,7 @@
         let enemies = [];
         let bullets = [];
         let ammoDrops = []; // Stores ammo box objects
+        let tonicDrops = []; // Stores tonic objects
         let gameActive = false;
         let canShoot = true;
         let isReloading = false;
@@ -310,18 +319,41 @@
         let isFanning = false;
         let isCocking = false;
         let lastStepTime = 0; // Timer for footsteps
+        let healTimer = 0; // Passive healing timer
         
         // Dead Eye
         let deadEyeActive = false;
         let deadEyeTargets = []; // Stores { enemy: obj, marker: mesh }
         let isExecutingDeadEye = false;
-        let deadEyeTimer = null; // Stores the timer
-        let lastDeadEyeEndTime = 0; // When did it finish last?
-        const DEAD_EYE_COOLDOWN = 8000; // 8s cooldown
+        let deadEyeTimer = null; 
+        
+        // Tonic System
+        let numTonics = 1;
+        const MAX_TONICS = 2;
+        let isTonicActive = false; // Boost active during usage
+        let tempFastRecharge = false; // Boost active during the subsequent recharge
+
+        // Stamina System (Dynamic based on tonic)
+        let deadEyeCharge = 6000; 
+        const MAX_DEAD_EYE = 6000; // Base Max
+        const RECHARGE_TIME = 8000; // Base Recharge
+
+        function getMaxDeadEye() { return isTonicActive ? 10000 : 6000; }
+        
+        // Recharge is fast if Tonic is currently active OR if we are recovering from a tonic usage
+        function getRechargeTime() { return (isTonicActive || tempFastRecharge) ? 4000 : 8000; }
+
+        // Visuals
+        let casings = []; // Array to store active shell casings (physics objects)
+        let loadingShells = []; // Array to store shells currently being inserted (animation objects)
 
         // Audio System
         let audioCtx;
         let heartbeatInterval;
+        
+        // NOTE: If you download this game, you can use your mp3 by uncommenting the line below
+        // and ensuring the mp3 file is in the same folder as this html file.
+        // const revolverAudio = new Audio('gun-shot-359196.mp3');
 
         // Assets
         const collidableObjects = []; // Buildings, obstacles
@@ -473,11 +505,11 @@
             // "Lub" - Deep Bass
             const osc1 = audioCtx.createOscillator();
             const gain1 = audioCtx.createGain();
-            osc1.type = 'sine'; // Pure tone for deep bass
-            osc1.frequency.setValueAtTime(55, now); // Lower frequency
-            osc1.frequency.exponentialRampToValueAtTime(30, now + 0.15); // Drop lower
+            osc1.type = 'sine'; 
+            osc1.frequency.setValueAtTime(55, now); 
+            osc1.frequency.exponentialRampToValueAtTime(30, now + 0.15); 
             
-            gain1.gain.setValueAtTime(0.8, now); // Higher volume for bass
+            gain1.gain.setValueAtTime(0.8, now); 
             gain1.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
             
             osc1.connect(gain1);
@@ -489,7 +521,7 @@
             const osc2 = audioCtx.createOscillator();
             const gain2 = audioCtx.createGain();
             osc2.type = 'sine';
-            osc2.frequency.setValueAtTime(50, now + 0.2); // Slight delay
+            osc2.frequency.setValueAtTime(50, now + 0.2); 
             osc2.frequency.exponentialRampToValueAtTime(25, now + 0.4);
             
             gain2.gain.setValueAtTime(0.6, now + 0.2);
@@ -501,6 +533,189 @@
             osc2.stop(now + 0.5);
         }
 
+        function playShootSound(type, hasEcho = true) {
+            // If you have a local file and uncommented the line above, use this:
+            /*
+            if (type === 'revolver' && typeof revolverAudio !== 'undefined') {
+                const sfx = revolverAudio.cloneNode();
+                sfx.volume = 0.5;
+                sfx.play().catch(e => console.warn("Audio play failed", e));
+                return; 
+            }
+            */
+
+            if (!audioCtx) return;
+            
+            const t = audioCtx.currentTime;
+            
+            // --- Configuration ---
+            let punchFreqStart = 100;
+            let punchDuration = 0.1;
+            let noiseDuration = 0.3;
+            let filterFreqStart = 1200;
+            let filterFreqEnd = 100;
+            let gainValue = 0.5;
+            let hasCrack = false; // High frequency snap layer
+
+            if (type === 'revolver') {
+                // Darker Revolver
+                punchFreqStart = 100; 
+                punchDuration = 0.12;
+                filterFreqStart = 800; 
+                filterFreqEnd = 40;
+                noiseDuration = 0.3;
+                gainValue = 0.65;
+                hasCrack = true; 
+            } else if (type === 'shotgun') {
+                punchFreqStart = 80; 
+                punchDuration = 0.2;
+                filterFreqStart = 1200; 
+                filterFreqEnd = 50;
+                noiseDuration = 0.6; 
+                gainValue = 0.8; 
+                hasCrack = false; 
+            } else if (type === 'rifle') {
+                // Darker & Echoey Rifle
+                punchFreqStart = 120; 
+                punchDuration = 0.15;
+                filterFreqStart = 3000; 
+                filterFreqEnd = 50; 
+                
+                // DYNAMIC ECHO
+                noiseDuration = hasEcho ? 1.2 : 0.4; 
+                
+                gainValue = 0.7;
+                hasCrack = true; 
+            }
+
+            // 1. The "Punch"
+            const osc = audioCtx.createOscillator();
+            const oscGain = audioCtx.createGain();
+            
+            osc.type = (type === 'shotgun') ? 'square' : 'triangle'; 
+            osc.frequency.setValueAtTime(punchFreqStart, t);
+            osc.frequency.exponentialRampToValueAtTime(10, t + punchDuration);
+            
+            oscGain.gain.setValueAtTime(gainValue * 0.8, t);
+            oscGain.gain.exponentialRampToValueAtTime(0.01, t + punchDuration);
+            
+            osc.connect(oscGain);
+            oscGain.connect(audioCtx.destination);
+            osc.start(t);
+            osc.stop(t + punchDuration);
+
+            // 2. The "Blast"
+            const bufferSize = audioCtx.sampleRate * noiseDuration;
+            const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < bufferSize; i++) {
+                data[i] = Math.random() * 2 - 1;
+            }
+            
+            const noise = audioCtx.createBufferSource();
+            noise.buffer = buffer;
+            
+            const noiseFilter = audioCtx.createBiquadFilter();
+            noiseFilter.type = 'lowpass';
+            noiseFilter.Q.value = 1; 
+            noiseFilter.frequency.setValueAtTime(filterFreqStart, t);
+            noiseFilter.frequency.exponentialRampToValueAtTime(filterFreqEnd, t + noiseDuration);
+            
+            const noiseGain = audioCtx.createGain();
+            noiseGain.gain.setValueAtTime(gainValue, t);
+            noiseGain.gain.exponentialRampToValueAtTime(0.01, t + noiseDuration);
+            
+            noise.connect(noiseFilter);
+            noiseFilter.connect(noiseGain);
+            noiseGain.connect(audioCtx.destination);
+            noise.start(t);
+            
+            // 3. The "Crack"
+            if (hasCrack) {
+                const crackDuration = 0.05;
+                const crackBuffer = audioCtx.createBuffer(1, audioCtx.sampleRate * crackDuration, audioCtx.sampleRate);
+                const cData = crackBuffer.getChannelData(0);
+                for(let i=0; i<cData.length; i++) cData[i] = Math.random() * 2 - 1;
+                
+                const crack = audioCtx.createBufferSource();
+                crack.buffer = crackBuffer;
+                
+                const crackFilter = audioCtx.createBiquadFilter();
+                crackFilter.type = 'highpass';
+                crackFilter.frequency.value = 2000; 
+                
+                const crackGain = audioCtx.createGain();
+                crackGain.gain.setValueAtTime(0.4, t);
+                crackGain.gain.exponentialRampToValueAtTime(0.01, t + crackDuration);
+                
+                crack.connect(crackFilter);
+                crackFilter.connect(crackGain);
+                crackGain.connect(audioCtx.destination);
+                crack.start(t);
+            }
+        }
+
+        function playShellDropSound() {
+            if (!audioCtx) return;
+            const t = audioCtx.currentTime;
+            
+            // Metallic Clink
+            const osc = audioCtx.createOscillator();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(1200 + Math.random()*400, t);
+            osc.frequency.exponentialRampToValueAtTime(1000, t + 0.05);
+            
+            const gain = audioCtx.createGain();
+            gain.gain.setValueAtTime(0.1, t);
+            gain.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+            
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start(t);
+            osc.stop(t + 0.1);
+        }
+
+        function playPickupSound() {
+            if (!audioCtx) return;
+            const t = audioCtx.currentTime;
+            const osc = audioCtx.createOscillator();
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(400, t);
+            osc.frequency.linearRampToValueAtTime(800, t + 0.1);
+            const gain = audioCtx.createGain();
+            gain.gain.setValueAtTime(0.1, t);
+            gain.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start(t);
+            osc.stop(t + 0.1);
+        }
+
+        function playDrinkSound() {
+            if (!audioCtx) return;
+            const t = audioCtx.currentTime;
+            // Gulp sound simulation (low filter sweep)
+            const noise = audioCtx.createBufferSource();
+            const buffer = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.3, audioCtx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for(let i=0; i<data.length; i++) data[i] = Math.random()*2-1;
+            noise.buffer = buffer;
+            
+            const filter = audioCtx.createBiquadFilter();
+            filter.type = 'lowpass';
+            filter.frequency.setValueAtTime(400, t);
+            filter.frequency.linearRampToValueAtTime(100, t + 0.2);
+            
+            const gain = audioCtx.createGain();
+            gain.gain.setValueAtTime(0.5, t);
+            gain.gain.linearRampToValueAtTime(0, t + 0.3);
+            
+            noise.connect(filter);
+            filter.connect(gain);
+            gain.connect(audioCtx.destination);
+            noise.start(t);
+        }
+
         function startHeartbeat() {
             if(heartbeatInterval) clearInterval(heartbeatInterval);
             playHeartbeatSound(); // Immediate
@@ -510,6 +725,101 @@
         function stopHeartbeat() {
             if(heartbeatInterval) clearInterval(heartbeatInterval);
             heartbeatInterval = null;
+        }
+
+        // --- Casing Visuals ---
+        function createShellMesh(color) {
+            const geo = new THREE.CylinderGeometry(0.02, 0.02, 0.08, 8);
+            const mat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.5, metalness: 0.5 });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.rotation.x = Math.PI / 2;
+            return mesh;
+        }
+
+        function ejectShells(count, gun) {
+            const origin = new THREE.Vector3();
+            gun.mesh.getWorldPosition(origin);
+            origin.y += 0.1; // Slightly above gun
+
+            // Gun quaternion for direction
+            const quaternion = camera.quaternion.clone();
+
+            // Determine Color
+            let shellColor = 0xD4AF37; // Brass/Gold
+            if (gun.type === 'shotgun') shellColor = 0xcc0000; // Red
+
+            for(let i=0; i<count; i++) {
+                const shell = createShellMesh(shellColor);
+                shell.position.copy(origin);
+                
+                // Add some randomness to start position
+                shell.position.x += (Math.random() - 0.5) * 0.1;
+                shell.position.z += (Math.random() - 0.5) * 0.1;
+
+                // Physics properties
+                const velocity = new THREE.Vector3(
+                    (Math.random() - 0.5) * 2 + 1.0, // Eject right
+                    Math.random() * 2 + 2,       // Eject up
+                    (Math.random() - 0.5) * 2 - 1.0 // Eject back
+                );
+                
+                // Apply camera rotation to velocity so it ejects relative to view
+                velocity.applyQuaternion(quaternion);
+
+                casings.push({
+                    mesh: shell,
+                    velocity: velocity,
+                    rotVel: new THREE.Vector3(Math.random()*10, Math.random()*10, Math.random()*10),
+                    active: true,
+                    bounces: 0
+                });
+                
+                scene.add(shell);
+            }
+        }
+
+        function animateLoadingShells(count, gun, duration) {
+            // Clear old if any (attached to camera)
+            loadingShells.forEach(s => camera.remove(s.mesh));
+            loadingShells = [];
+
+            const dest = new THREE.Vector3();
+            gun.mesh.getWorldPosition(dest);
+            dest.y -= 0.2; // Target: Gun breech
+
+            // Camera quaternion
+            const quaternion = camera.quaternion.clone();
+
+            // Determine Color
+            let shellColor = 0xD4AF37; // Brass/Gold
+            if (gun.type === 'shotgun') shellColor = 0xcc0000; // Red
+
+            for(let i=0; i<count; i++) {
+                const shell = createShellMesh(shellColor);
+                
+                // Start position: Below screen
+                const startPos = dest.clone();
+                startPos.y -= 1.5; 
+                startPos.x += (i * 0.1) - (count * 0.05); // Spread out slightly
+                
+                // Apply rotation so they point up
+                shell.rotation.z = Math.PI / 2;
+
+                shell.position.copy(startPos);
+                
+                // Parent to camera
+                camera.add(shell);
+                // Adjust local pos since parented
+                shell.position.set(0.2 + (i * 0.05), -1.0, -0.5);
+
+                loadingShells.push({
+                    mesh: shell,
+                    startTime: performance.now(),
+                    duration: duration,
+                    targetY: -0.4, // Move up to here
+                    targetZ: -0.6 // Move forward to here
+                });
+            }
         }
 
         // --- Init ---
@@ -774,9 +1084,9 @@
                     name: "RIFLE",
                     mesh: rifleGroup,
                     type: "rifle",
-                    ammo: 8,
-                    maxAmmo: 8,
-                    reserveAmmo: 16,
+                    ammo: 10,
+                    maxAmmo: 10,
+                    reserveAmmo: 20,
                     reloadTime: 4500, // 4.5s
                     damage: 2, 
                     pellets: 1,
@@ -796,6 +1106,10 @@
                 isReloading = false;
                 // Reset old gun animation state immediately
                 if(guns[currentGunIndex].mesh) guns[currentGunIndex].mesh.rotation.x = 0;
+                
+                // Remove visual floating shells if reloading was cancelled
+                loadingShells.forEach(s => camera.remove(s.mesh));
+                loadingShells = [];
             }
 
             // Cancel Cocking if active
@@ -828,30 +1142,81 @@
             ammoDrops.push({ mesh: mesh });
         }
 
-        function checkAmmoPickups() {
+        function createTonicDrop(pos) {
+            const geo = new THREE.CylinderGeometry(0.15, 0.15, 0.5, 8);
+            const mat = new THREE.MeshLambertMaterial({ color: 0xcc0000 }); // Red bottle
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.copy(pos);
+            mesh.position.y = 0.25; 
+            scene.add(mesh);
+            tonicDrops.push({ mesh: mesh });
+        }
+
+        function drinkTonic() {
+            if (numTonics > 0 && !isTonicActive) {
+                numTonics--;
+                isTonicActive = true;
+                tempFastRecharge = false; // Reset just in case
+                playDrinkSound();
+                updateHUD();
+                
+                // Boost visuals (flash screen red?)
+                const overlay = document.getElementById('damage-overlay');
+                if (overlay) {
+                    overlay.style.backgroundColor = 'rgba(255, 0, 0, 0.2)'; // Faint red tint
+                    overlay.style.opacity = 0.5;
+                    setTimeout(() => {
+                        overlay.style.opacity = 0;
+                        setTimeout(() => overlay.style.backgroundColor = 'radial-gradient(circle, transparent 50%, rgba(139, 0, 0, 0.6))', 200); // Reset
+                    }, 500);
+                }
+            }
+        }
+
+        function checkPickups() {
+            // Check Ammo
             for (let i = ammoDrops.length - 1; i >= 0; i--) {
                 const drop = ammoDrops[i];
                 const dist = camera.position.distanceTo(drop.mesh.position);
-                
-                // Rotate visual
                 drop.mesh.rotation.y += 0.05;
 
                 if (dist < 2.5) {
-                    // Pickup Logic
-                    guns[0].reserveAmmo += 6; // Add Revolver Ammo
-                    guns[1].reserveAmmo += 2; // Add Shotgun Ammo
-                    guns[2].reserveAmmo += 4; // Add Rifle Ammo
-                    
-                    // Cleanup
+                    guns[0].reserveAmmo += 6; 
+                    guns[1].reserveAmmo += 2; 
+                    guns[2].reserveAmmo += 4; 
                     scene.remove(drop.mesh);
                     ammoDrops.splice(i, 1);
                     updateHUD();
+                    playPickupSound();
                     
-                    // Flash Message
                     const pickMsg = document.getElementById('pickup-msg');
+                    pickMsg.innerText = "+ AMMO PICKED UP";
+                    pickMsg.style.color = "#00ff00";
                     pickMsg.style.display = 'block';
-                    pickMsg.style.opacity = '1';
                     setTimeout(() => pickMsg.style.display = 'none', 1500);
+                }
+            }
+
+            // Check Tonics
+            for (let i = tonicDrops.length - 1; i >= 0; i--) {
+                const drop = tonicDrops[i];
+                const dist = camera.position.distanceTo(drop.mesh.position);
+                drop.mesh.rotation.y += 0.05;
+
+                if (dist < 2.5) {
+                    if (numTonics < MAX_TONICS) {
+                        numTonics++;
+                        scene.remove(drop.mesh);
+                        tonicDrops.splice(i, 1);
+                        updateHUD();
+                        playPickupSound();
+                        
+                        const pickMsg = document.getElementById('pickup-msg');
+                        pickMsg.innerText = "+ TONIC PICKED UP";
+                        pickMsg.style.color = "#ff0000";
+                        pickMsg.style.display = 'block';
+                        setTimeout(() => pickMsg.style.display = 'none', 1500);
+                    }
                 }
             }
         }
@@ -1046,6 +1411,11 @@
             gameActive = true;
             playerHealth = 100;
             wave = 1;
+            healTimer = 0;
+            
+            // Tonic Init
+            numTonics = 1;
+            isTonicActive = false;
             
             // Reset Ammo
             guns.forEach(g => {
@@ -1058,6 +1428,8 @@
             // Clear drops
             ammoDrops.forEach(d => scene.remove(d.mesh));
             ammoDrops = [];
+            tonicDrops.forEach(d => scene.remove(d.mesh));
+            tonicDrops = [];
             
             // Clear dead eye
             deadEyeTargets.forEach(t => scene.remove(t.marker));
@@ -1106,6 +1478,7 @@
             const mat = new THREE.MeshLambertMaterial({ color: 0x8b0000 }); 
             const matHead = new THREE.MeshLambertMaterial({ color: 0xffccaa }); 
             const matHat = new THREE.MeshLambertMaterial({ color: 0x000000 }); 
+            const matGun = new THREE.MeshStandardMaterial({ color: 0x111111, metalness: 0.8, roughness: 0.4 }); // Gun Material
 
             const group = new THREE.Group();
 
@@ -1128,6 +1501,20 @@
             hatTop.position.y = 2.4;
             hatTop.name = 'Head';
             group.add(hatTop);
+
+            // Enemy Gun
+            const gunGroup = new THREE.Group();
+            const gunBody = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.15, 0.4), matGun);
+            const gunHandle = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.2, 0.1), new THREE.MeshLambertMaterial({ color: 0x5c3a21 })); // Wood handle
+            gunHandle.position.set(0, -0.1, 0.15);
+            gunHandle.rotation.x = 0.3;
+            
+            gunGroup.add(gunBody);
+            gunGroup.add(gunHandle);
+            
+            // Position gun extending from "arm" area
+            gunGroup.position.set(0.6, 1.2, 0.4); 
+            group.add(gunGroup);
 
             let validPosition = false;
             let attempts = 0;
@@ -1235,6 +1622,9 @@
 
                 // Visual feedback: Tilt down/up to simulate working the lever
                 if(gun.mesh) gun.mesh.rotation.x = 0.25;
+                
+                // Eject shell (Simulate lever action cycling the spent casing out)
+                ejectShells(1, gun);
 
                 // Wait 0.2 seconds
                 setTimeout(() => {
@@ -1264,7 +1654,8 @@
             updateHUD();
 
             const raycaster = new THREE.Raycaster();
-            
+            let hitWall = false;
+
             // Fire multiple pellets based on gun type
             for (let p = 0; p < gun.pellets; p++) {
                 // Calculate spread
@@ -1275,8 +1666,10 @@
                 if (gun.type === 'revolver' && isFanning) {
                     // Check movement for dynamic accuracy
                     const isMoving = moveForward || moveBackward || moveLeft || moveRight;
-                    // Significantly increased spread while moving (0.4)
-                    const fanningInaccuracy = isMoving ? 0.4 : 0.06; 
+                    
+                    // IMPROVED ACCURACY:
+                    // Was 0.4 (moving) and 0.06 (still). Now much tighter.
+                    const fanningInaccuracy = isMoving ? 0.15 : 0.02; 
 
                     spreadX += (Math.random() - 0.5) * fanningInaccuracy;
                     spreadY += (Math.random() - 0.5) * fanningInaccuracy;
@@ -1309,6 +1702,7 @@
                     }
                     if(isSelf) continue;
                     if (ammoDrops.some(d => d.mesh === hit.object)) continue;
+                    if (tonicDrops.some(d => d.mesh === hit.object)) continue; // Ignore tonics
                     // Ignore markers
                     if (hit.object.geometry instanceof THREE.PlaneGeometry && hit.object.material.map === texMarker) continue;
 
@@ -1322,6 +1716,7 @@
                     } else if (collidableObjects.includes(hit.object) || hit.object.parent && collidableObjects.includes(hit.object.parent) || hit.object.geometry instanceof THREE.PlaneGeometry) {
                         firstHit = hit;
                         hitType = 'wall';
+                        hitWall = true;
                         break;
                     }
                 }
@@ -1340,7 +1735,11 @@
                         enemyRef.mesh.position.add(raycaster.ray.direction.multiplyScalar(0.2));
                         
                         if (enemyRef.health <= 0 && enemies.includes(enemyRef)) {
+                            // Drop Logic
                             createAmmoDrop(enemyRef.mesh.position);
+                            // 10% Chance for Tonic
+                            if (Math.random() < 0.1) createTonicDrop(enemyRef.mesh.position);
+
                             scene.remove(enemyRef.mesh);
                             enemies.splice(enemies.indexOf(enemyRef), 1);
                             
@@ -1358,6 +1757,9 @@
                     createBulletTrace(gun.mesh.getWorldposition(new THREE.Vector3()), target);
                 }
             }
+
+            // Play Sound
+            playShootSound(gun.type, !hitWall);
         }
 
         THREE.Object3D.prototype.getWorldposition = function (target) {
@@ -1397,6 +1799,7 @@
             const gun = guns[currentGunIndex];
             document.getElementById('health-val').innerText = playerHealth;
             document.getElementById('wave-val').innerText = wave;
+            document.getElementById('tonic-val').innerText = numTonics;
             
             document.getElementById('weapon-name').innerText = gun.name;
             document.getElementById('ammo-val').innerText = gun.ammo;
@@ -1423,6 +1826,20 @@
             const emptyFactor = missingRounds / gun.maxAmmo;
             const dynamicTime = gun.reloadTime * emptyFactor;
 
+            // 1. Eject Spent Shells Immediately
+            // Rifle only ejects 1 (clearing chamber), others eject all spent
+            let ejectCount = missingRounds;
+            if (gun.type === 'rifle') ejectCount = 1;
+
+            ejectShells(ejectCount, gun);
+
+            // 2. Schedule New Shells Animation (Start halfway through)
+            setTimeout(() => {
+                if(isReloading) { // Check if not cancelled
+                    animateLoadingShells(missingRounds, gun, dynamicTime * 0.5);
+                }
+            }, dynamicTime * 0.2); // Start a bit early
+
             // Assign to global variable
             reloadTimer = setTimeout(() => {
                 const needed = gun.maxAmmo - gun.ammo;
@@ -1433,6 +1850,11 @@
                 
                 isReloading = false;
                 if(gun.mesh) gun.mesh.rotation.x = 0;
+                
+                // Cleanup loading shells
+                loadingShells.forEach(s => camera.remove(s.mesh));
+                loadingShells = [];
+
                 updateHUD();
             }, dynamicTime);
         }
@@ -1447,29 +1869,42 @@
             document.getElementById('start-btn').innerText = "TRY AGAIN";
         }
 
-        // --- Dead Eye Logic ---
-        function setEnemyHighlight(active) {
+        // --- Visual Update Logic (Highlights) ---
+        function updateEnemyVisuals() {
+            // Highlighting only activates on Wave 4+ when 2 or fewer enemies remain
+            const isLowCount = wave >= 4 && enemies.length > 0 && enemies.length <= 2;
+            
             enemies.forEach(e => {
                 e.mesh.traverse(child => {
                     if (child.isMesh) {
-                        if (active) {
-                            // Enable Highlight (No X-Ray)
-                            child.material.emissive.setHex(0xff0000); // Red Glow
-                            
-                            // Ensure standard depth testing is ON so walls block visibility
+                        if (isLowCount) {
+                            // PRIORITY 1: Low Count (Wave 4+) = Red X-Ray (Visible through walls)
+                            child.material.emissive.setHex(0xff0000); 
+                            child.material.depthTest = false;
+                            child.material.depthWrite = false;
+                            child.renderOrder = 999;
+                        } else if (deadEyeActive) {
+                            // PRIORITY 2: Dead Eye = Red Highlight (Occluded by walls)
+                            child.material.emissive.setHex(0xff0000);
                             child.material.depthTest = true;
                             child.material.depthWrite = true;
                             child.renderOrder = 0; 
                         } else {
-                            // Reset to Normal
+                            // NORMAL: No highlight
+                            child.material.emissive.setHex(0x000000);
                             child.material.depthTest = true;
                             child.material.depthWrite = true;
-                            child.material.emissive.setHex(0x000000);
                             child.renderOrder = 0;
                         }
                     }
                 });
             });
+        }
+
+        // --- Dead Eye Logic ---
+        function setEnemyHighlight(active) {
+            // Deprecated: Logic moved to updateEnemyVisuals to handle complex states
+            updateEnemyVisuals();
         }
 
         function toggleDeadEye() {
@@ -1481,74 +1916,44 @@
             const text = document.getElementById('deadeye-text');
 
             if (deadEyeActive) {
-                // Deactivate / Cancel manually (Z key)
+                // Deactivate manually
                 deadEyeActive = false;
-                setEnemyHighlight(false); // Turn off X-Ray
-                stopHeartbeat(); // Stop Heartbeat
+                stopHeartbeat(); 
                 
-                // Set cooldown start time
-                lastDeadEyeEndTime = performance.now();
-
-                if (deadEyeTimer) clearTimeout(deadEyeTimer); 
+                // If tonic was active, consume it and trigger fast recharge
+                if (isTonicActive) {
+                    isTonicActive = false;
+                    tempFastRecharge = true;
+                }
 
                 overlay.style.opacity = 0;
                 text.style.display = 'none';
-                
-                // Hide and reset bar
                 container.style.display = 'none';
-                bar.style.transition = 'none';
-                bar.style.width = '100%';
                 
-                // Remove markers
+                // Remove markers if cancelled without firing
                 deadEyeTargets.forEach(t => scene.remove(t.marker));
                 deadEyeTargets = [];
-            } else {
-                // Check Cooldown Status BEFORE activating
-                const now = performance.now();
-                const cooldownElapsed = now - lastDeadEyeEndTime;
                 
-                // Minimum Charge Requirement: Must be at least 50% full
-                if (cooldownElapsed < DEAD_EYE_COOLDOWN / 2) return;
+                updateHUD(); // Refresh HUD to show tonic gone
+            } else {
+                // Activate check: Needs at least 50% charge of CURRENT max
+                const currentMax = getMaxDeadEye();
+                if (deadEyeCharge < currentMax / 2) return;
 
                 // Activate
                 deadEyeActive = true;
-                setEnemyHighlight(true); // Turn on Highlight
-                playWoosh(); // Play Woosh
-                startHeartbeat(); // Start Heartbeat
+                playWoosh();
+                startHeartbeat();
                 
                 overlay.style.opacity = 1;
                 text.style.display = 'block';
                 
-                let activeDuration = 6000; // Default full duration
-                
-                // If used before 100% full (but after 50%), penalty applies
-                if (cooldownElapsed < DEAD_EYE_COOLDOWN) {
-                    activeDuration = 4000; // Penalty duration
-                }
-
-                // Show and animate bar
+                // Show Duration Bar
                 container.style.display = 'block';
-                bar.style.transition = 'none';
-                bar.style.width = '100%';
-                
-                // Force reflow
-                void bar.offsetWidth;
-
-                // Animate to 0% over activeDuration
-                bar.style.transition = 'width ' + activeDuration + 'ms linear';
-                bar.style.width = '0%';
-
-                // Auto-cancel / Auto-fire after duration
-                deadEyeTimer = setTimeout(() => {
-                    if (deadEyeActive) {
-                        // If targets are marked, SHOOT them. If empty, cancel.
-                        if (deadEyeTargets.length > 0) {
-                            executeDeadEye();
-                        } else {
-                            toggleDeadEye(); 
-                        }
-                    }
-                }, activeDuration);
+                bar.style.width = (deadEyeCharge / currentMax * 100) + '%';
+                // If tonic active, make bar Gold to signify power
+                bar.style.background = isTonicActive ? '#FFD700' : '#ff3333';
+                bar.style.transition = 'none'; 
             }
         }
 
@@ -1559,16 +1964,12 @@
             
             isExecutingDeadEye = true;
             deadEyeActive = false; 
-            stopHeartbeat(); // Stop Heartbeat
-            lastDeadEyeEndTime = performance.now(); // Set cooldown start
+            stopHeartbeat(); 
             
             // Hide UI
             document.getElementById('deadeye-overlay').style.opacity = 0;
             document.getElementById('deadeye-text').style.display = 'none';
-            
-            // Hide bar immediately
-            const container = document.getElementById('deadeye-bar-container');
-            container.style.display = 'none';
+            document.getElementById('deadeye-bar-container').style.display = 'none';
 
             let shotIndex = 0;
             
@@ -1584,7 +1985,12 @@
                     setTimeout(fireNext, 150); 
                 } else {
                     isExecutingDeadEye = false;
-                    setEnemyHighlight(false); // Turn off X-Ray when done shooting
+                    // Reset Tonic and start fast recharge
+                    if (isTonicActive) {
+                        isTonicActive = false;
+                        tempFastRecharge = true;
+                        updateHUD();
+                    }
                     deadEyeTargets.forEach(t => scene.remove(t.marker));
                     deadEyeTargets = [];
                 }
@@ -1607,6 +2013,7 @@
                 case 'Digit1': switchWeapon(0); break;
                 case 'Digit2': switchWeapon(1); break;
                 case 'Digit3': switchWeapon(2); break;
+                case 'Digit4': drinkTonic(); break;
                 case 'KeyE': isFanning = true; break;
                 case 'KeyZ': toggleDeadEye(); break;
                 case 'KeyQ': executeDeadEye(); break;
@@ -1666,14 +2073,120 @@
             const delta = (time - prevTime) / 1000;
             prevTime = time;
 
-            if (controlsEnabled && gameActive) {
-                // Update Cooldown Bar
-                const cooldownElapsed = time - lastDeadEyeEndTime;
-                const cooldownPercent = Math.min(100, (cooldownElapsed / DEAD_EYE_COOLDOWN) * 100);
-                const cooldownBar = document.getElementById('cooldown-bar');
-                if(cooldownBar) cooldownBar.style.width = cooldownPercent + '%';
+            // --- Update Shell Physics ---
+            // ... (Shell logic stays same) ...
+            for (let i = casings.length - 1; i >= 0; i--) {
+                const c = casings[i];
+                if (c.active) {
+                    c.velocity.y -= 9.8 * delta;
+                    c.mesh.position.add(c.velocity.clone().multiplyScalar(delta));
+                    c.mesh.rotation.x += c.rotVel.x * delta;
+                    c.mesh.rotation.z += c.rotVel.z * delta;
+                    if (c.mesh.position.y <= 0.02) {
+                        c.mesh.position.y = 0.02;
+                        c.velocity.y *= -0.5;
+                        c.velocity.x *= 0.8;
+                        c.velocity.z *= 0.8;
+                        c.bounces++;
+                        if (c.velocity.length() < 0.1) c.active = false;
+                    }
+                }
+            }
+            if (casings.length > 20) {
+                const old = casings.shift();
+                scene.remove(old.mesh);
+            }
 
-                // If Dead Eye Active, skip updates (Pause World)
+            // --- Update Loading Animation ---
+            for (let i = loadingShells.length - 1; i >= 0; i--) {
+                const s = loadingShells[i];
+                const elapsed = time - s.startTime;
+                const progress = Math.min(1, elapsed / s.duration);
+                s.mesh.position.y = -1.0 + ((-0.4 - -1.0) * progress);
+                s.mesh.position.z = -0.5 + ((-0.6 - -0.5) * progress);
+                if (progress >= 1) {
+                    camera.remove(s.mesh);
+                    loadingShells.splice(i, 1);
+                }
+            }
+
+            if (controlsEnabled && gameActive) {
+                
+                // Update Enemy Highlights (X-Ray for low count, etc.)
+                updateEnemyVisuals();
+                
+                // Check Pickups (Ammo & Tonics)
+                checkPickups();
+
+                // Passive Healing (5% every 10s)
+                healTimer += delta;
+                if (healTimer >= 10.0) {
+                    if (playerHealth < 100) {
+                        playerHealth = Math.min(100, playerHealth + 5);
+                        updateHUD();
+                    }
+                    healTimer = 0;
+                }
+
+                // --- DEAD EYE STAMINA LOGIC ---
+                const currentMax = getMaxDeadEye();
+                const currentRechargeTime = getRechargeTime();
+
+                if (!isExecutingDeadEye) {
+                    if (deadEyeActive) {
+                        // DRAIN
+                        deadEyeCharge -= delta * 1000;
+                        if (deadEyeCharge <= 0) {
+                            deadEyeCharge = 0;
+                            // Time's up!
+                            if (deadEyeTargets.length > 0) {
+                                executeDeadEye(); // Auto fire if marks exist
+                            } else {
+                                toggleDeadEye(); // Just cancel
+                            }
+                        }
+                    } else {
+                        // RECHARGE
+                        const rechargeAmount = delta * 1000 * (currentMax / currentRechargeTime);
+                        deadEyeCharge += rechargeAmount;
+                        
+                        // Cap Logic:
+                        // If tempFastRecharge is active, we turn it off once we hit the NORMAL max (6000)
+                        // Because "one cycle" is done, next cycle is normal.
+                        if (tempFastRecharge && deadEyeCharge >= 6000) {
+                            tempFastRecharge = false;
+                        }
+
+                        if (deadEyeCharge > currentMax) deadEyeCharge = currentMax;
+                    }
+                }
+
+                // Update UI Bars
+                const chargePercent = (deadEyeCharge / currentMax) * 100;
+                
+                // 1. Cooldown Bar (Top Left)
+                const cooldownBar = document.getElementById('cooldown-bar');
+                if (cooldownBar) {
+                    cooldownBar.style.width = chargePercent + '%';
+                    cooldownBar.style.transition = 'none'; // Instant update
+                    
+                    if (isTonicActive || tempFastRecharge) {
+                        // Gold if tonic active OR fast recharge active
+                        cooldownBar.style.backgroundColor = '#FFD700';
+                    } else if (deadEyeCharge < currentMax / 2) {
+                        cooldownBar.style.backgroundColor = '#777'; // Unavailable
+                    } else {
+                        cooldownBar.style.backgroundColor = '#00ffff'; // Ready
+                    }
+                }
+
+                // 2. Duration Bar (Bottom Left) - Only when active
+                const durationBar = document.getElementById('deadeye-bar');
+                if (durationBar && deadEyeActive) {
+                    durationBar.style.width = chargePercent + '%';
+                }
+
+                // If Dead Eye Active, skip movement/AI updates (Pause World)
                 if (deadEyeActive) {
                     // Just render
                     renderer.render(scene, camera);
@@ -1684,8 +2197,6 @@
                 if (!isExecutingDeadEye) {
                     // Normal Gameplay Logic
                     
-                    checkAmmoPickups();
-
                     velocity.x -= velocity.x * 10.0 * delta;
                     velocity.z -= velocity.z * 10.0 * delta;
                     velocity.y -= 30.0 * delta; 
